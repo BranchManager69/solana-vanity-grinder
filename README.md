@@ -147,6 +147,55 @@ cargo run --release -- generate btc --no-case-sensitive
 cargo run --release -- generate DEGEN --max-attempts 10000000
 ```
 
+### REST API Server
+
+The vanity-grinder also includes a full REST API for remote operation:
+
+```bash
+# Start the REST API server
+cargo run --release -- serve --host 0.0.0.0 --port 7777
+
+# Configure allowed CORS origins
+cargo run --release -- serve --allowed-origins "http://localhost:3000,http://example.com"
+```
+
+#### API Endpoints
+
+| Endpoint             | Method | Description                                |
+|----------------------|--------|--------------------------------------------|
+| `/health`            | GET    | Check API server status                    |
+| `/jobs`              | GET    | List all vanity generation jobs            |
+| `/jobs/{job_id}`     | GET    | Get status and result for a specific job   |
+| `/jobs`              | POST   | Create a new vanity generation job         |
+| `/jobs/{job_id}/cancel` | POST | Cancel a running job                      |
+
+#### Example API Usage
+
+Create a new job:
+
+```bash
+curl -X POST http://localhost:7777/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pattern": "DEGEN",
+    "is_suffix": false,
+    "case_sensitive": true,
+    "max_attempts": 100000000
+  }'
+```
+
+Check job status:
+
+```bash
+curl http://localhost:7777/jobs/d290f1ee-6c54-4b01-90e6-d701748f0851
+```
+
+Cancel a job:
+
+```bash
+curl -X POST http://localhost:7777/jobs/d290f1ee-6c54-4b01-90e6-d701748f0851/cancel
+```
+
 ## Keypair Output Format
 
 Generated keypairs are stored in JSON format compatible with Solana CLI tools:
@@ -164,11 +213,13 @@ Generated keypairs are stored in JSON format compatible with Solana CLI tools:
 ## Project Status
 
 - [x] Time estimator with advanced probability model
-- [x] Core keypair generation with cuRAND acceleration
+- [x] Core keypair generation with cuRAND acceleration 
 - [x] GPU acceleration with dynamic batch sizing
 - [x] Pattern matching (prefix, suffix) with case-sensitivity options
 - [x] Comprehensive CLI interface with detailed reporting
 - [x] Secure and compatible keypair storage (JSON format)
+- [x] REST API for remote control via HTTP
+- [x] Job queue management system
 
 ## Future Development Roadmap
 
@@ -178,6 +229,8 @@ Generated keypairs are stored in JSON format compatible with Solana CLI tools:
 - [ ] CUDA Cooperative Groups for improved concurrency
 - [ ] Unified Memory for simplified memory management
 - [ ] Pattern complexity analyzer to estimate search time more accurately
+- [ ] WebSocket notifications for job status changes
+- [ ] Support for external callback URLs after job completion
 
 ## License
 

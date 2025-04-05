@@ -33,6 +33,52 @@ pub struct VanityResult {
     pub attempts: u64,
 }
 
+/// Find the optimal batch size for the GPU
+pub fn find_optimal_batch_size(device: &CudaDevice) -> Result<usize> {
+    // For CUDA, we need much larger batch sizes to saturate the GPU
+    let batch_sizes = [100_000, 500_000, 1_000_000, 5_000_000, 10_000_000];
+    let mut best_size = batch_sizes[0];
+    let mut best_rate = 0.0;
+    
+    for &size in &batch_sizes {
+        // Print in dark gray
+        println!("{} {}", "Testing batch size:".truecolor(150, 150, 150), 
+                 format_number(size as f64).truecolor(150, 150, 150));
+        
+        match crate::cuda_helpers::benchmark_batch_gpu(device, size) {
+            Ok(rate) => {
+                // Print in light gray
+                println!("  {}: {} {}", "Rate".truecolor(200, 200, 200), 
+                         format_number(rate).truecolor(200, 200, 200), 
+                         "keys/s".truecolor(200, 200, 200));
+                
+                if rate > best_rate {
+                    best_rate = rate;
+                    best_size = size;
+                }
+                
+                // If we've found a good batch size and we're within 95% of the best rate,
+                // prefer the smaller batch size for faster iterations
+                if rate > 0.95 * best_rate && size < best_size {
+                    best_size = size;
+                }
+            },
+            Err(e) => {
+                println!("  {}: {}", "Error with batch size".red().bold(), format_number(size as f64));
+                println!("  {}", e.to_string().red());
+                // If this batch size failed, don't try larger ones
+                break;
+            }
+        }
+    }
+    
+    if best_rate == 0.0 {
+        return Err(CudaError::Other("Could not find a working batch size".to_string()));
+    }
+    
+    Ok(best_size)
+}
+
 /// Generate a vanity address matching the specified pattern
 pub fn generate_vanity_address(
     device: &CudaDevice,
@@ -41,6 +87,36 @@ pub fn generate_vanity_address(
     case_sensitive: bool,
     batch_size: usize,
     max_attempts: Option<u64>,
+) -> Result<VanityResult> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    
+    // Create a dummy stop flag that is never set
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    
+    // Call the version with progress updates, but with a dummy callback
+    generate_vanity_address_with_updates(
+        device,
+        pattern,
+        mode,
+        case_sensitive,
+        batch_size,
+        max_attempts,
+        stop_flag,
+        |_| {}
+    )
+}
+
+/// Generate a vanity address with progress updates and cancellation support
+pub fn generate_vanity_address_with_updates(
+    device: &CudaDevice,
+    pattern: &str,
+    mode: VanityMode,
+    case_sensitive: bool,
+    batch_size: usize,
+    max_attempts: Option<u64>,
+    stop_flag: Arc<AtomicBool>,
+    update_callback: impl Fn(u64) + Send,
 ) -> Result<VanityResult> {
     // Pattern validation (Solana addresses use base58 alphabet)
     for c in pattern.chars() {
@@ -168,16 +244,34 @@ pub fn generate_vanity_address(
     let max_attempts = max_attempts.unwrap_or(u64::MAX);
 
     while !found && attempts < max_attempts {
+        // Check if we should stop (for cancellation)
+        if stop_flag.load(Ordering::Relaxed) {
+            unsafe {
+                device.free(d_states)?;
+                device.free(d_seeds)?;
+                device.free(d_result)?;
+                device.free(d_found_flag)?;
+                device.free(d_pattern)?;
+            }
+            return Err(CudaError::Other("Search was cancelled".to_string()));
+        }
+        
         // Update progress every 5 iterations
-        if attempts % (5 * batch_size as u64) == 0 && attempts > 0 {
-            let elapsed = start_time.elapsed();
-            let rate = attempts as f64 / elapsed.as_secs_f64();
+        if attempts % (5 * batch_size as u64) == 0 {
+            // Call the update callback with current progress
+            update_callback(attempts);
             
-            println!("{}",
-                     format!("⚡ Searching... {} addresses checked ({}/s)",
-                             format_number(attempts as f64),
-                             format_number(rate))
-                     .bright_blue());
+            // For CLI version, print progress
+            if attempts > 0 {
+                let elapsed = start_time.elapsed();
+                let rate = attempts as f64 / elapsed.as_secs_f64();
+                
+                println!("{}",
+                         format!("⚡ Searching... {} addresses checked ({}/s)",
+                                 format_number(attempts as f64),
+                                 format_number(rate))
+                         .bright_blue());
+            }
         }
 
         unsafe {
@@ -206,6 +300,9 @@ pub fn generate_vanity_address(
             attempts += batch_size as u64;
         }
     }
+
+    // Final progress update
+    update_callback(attempts);
 
     // If found, retrieve the result
     if found {
