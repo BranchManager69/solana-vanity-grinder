@@ -10,9 +10,10 @@ use crate::cuda_helpers::CudaDevice;
 use crate::cuda::vanity_generator::{self, VanityMode, VanityResult};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
+use reqwest;
 
 // API Data structures
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct VanityRequest {
     pub pattern: String,
     pub is_suffix: bool,
@@ -140,11 +141,43 @@ impl JobManager {
         let mut jobs = self.jobs.lock().unwrap();
         
         if let Some(job) = jobs.get_mut(job_id) {
+            // Update job with result
             job.status = JobStatus::Completed;
-            job.result = Some(result);
+            job.result = Some(result.clone());
             job.updated_at = chrono::Utc::now();
             job.duration_ms = result.duration_ms;
             job.attempts = result.attempts;
+            
+            // Check if there's a callback URL to notify
+            if let Some(callback_url) = &job.request.callback_url {
+                // Clone the job for the callback
+                let job_clone = job.clone();
+                
+                // Spawn a task to send the callback asynchronously
+                tokio::spawn(async move {
+                    // Try to send the callback
+                    let client = reqwest::Client::new();
+                    match client.post(callback_url)
+                        .json(&job_clone)
+                        .timeout(Duration::from_secs(10))
+                        .send()
+                        .await 
+                    {
+                        Ok(response) => {
+                            if response.status().is_success() {
+                                info!("Callback to {} succeeded for job {}", callback_url, job_id);
+                            } else {
+                                warn!("Callback to {} for job {} returned non-success status: {}", 
+                                      callback_url, job_id, response.status());
+                            }
+                        },
+                        Err(e) => {
+                            warn!("Callback to {} for job {} failed: {}", callback_url, job_id, e);
+                        }
+                    }
+                });
+            }
+            
             Ok(())
         } else {
             Err(format!("Job not found: {}", job_id))
@@ -158,6 +191,37 @@ impl JobManager {
             job.status = JobStatus::Failed;
             job.updated_at = chrono::Utc::now();
             info!("Job {} failed: {}", job_id, error);
+            
+            // Check if there's a callback URL to notify
+            if let Some(callback_url) = &job.request.callback_url {
+                // Clone the job for the callback
+                let job_clone = job.clone();
+                
+                // Spawn a task to send the callback asynchronously
+                tokio::spawn(async move {
+                    // Try to send the callback
+                    let client = reqwest::Client::new();
+                    match client.post(callback_url)
+                        .json(&job_clone)
+                        .timeout(Duration::from_secs(10))
+                        .send()
+                        .await 
+                    {
+                        Ok(response) => {
+                            if response.status().is_success() {
+                                info!("Failure callback to {} succeeded for job {}", callback_url, job_id);
+                            } else {
+                                warn!("Failure callback to {} for job {} returned non-success status: {}", 
+                                      callback_url, job_id, response.status());
+                            }
+                        },
+                        Err(e) => {
+                            warn!("Failure callback to {} for job {} failed: {}", callback_url, job_id, e);
+                        }
+                    }
+                });
+            }
+            
             Ok(())
         } else {
             Err(format!("Job not found: {}", job_id))
@@ -301,8 +365,12 @@ async fn create_job(
         }));
     }
     
+    // Check if callback URL is provided
+    let has_callback = request.callback_url.is_some();
+    let request_inner = request.into_inner();
+    
     // Add job to queue
-    match job_manager.add_job(request.into_inner()) {
+    match job_manager.add_job(request_inner) {
         Ok(job_id) => {
             // Send job to worker queue
             if let Err(e) = job_queue.send(job_id.clone()).await {
@@ -312,9 +380,25 @@ async fn create_job(
                 }));
             }
             
-            HttpResponse::Accepted().json(serde_json::json!({
-                "job_id": job_id
-            }))
+            // Include callback info in response
+            let mut response = serde_json::json!({
+                "job_id": job_id,
+                "status": "queued"
+            });
+            
+            if has_callback {
+                response["notification"] = serde_json::json!({
+                    "type": "callback",
+                    "message": "A POST request will be sent to your callback URL when the job completes"
+                });
+            } else {
+                response["notification"] = serde_json::json!({
+                    "type": "poll",
+                    "message": "No callback URL provided. You'll need to poll for job status"
+                });
+            }
+            
+            HttpResponse::Accepted().json(response)
         },
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({

@@ -241,6 +241,30 @@ Cancel a job:
 curl -X POST http://localhost:7777/jobs/d290f1ee-6c54-4b01-90e6-d701748f0851/cancel
 ```
 
+#### Using Callbacks for Command Server Integration
+
+Instead of polling for job status, you can provide a callback URL when creating a job:
+
+```bash
+curl -X POST http://localhost:7777/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pattern": "DEGEN",
+    "is_suffix": false,
+    "case_sensitive": true,
+    "callback_url": "http://147.79.74.67:8080/vanity-callback"
+  }'
+```
+
+When the job completes or fails, the vanity-grinder will send a POST request to your callback URL with the complete job data, including:
+
+- Job ID and status
+- The pattern used
+- The found address and keypair (if successful)
+- Performance metrics
+
+This allows your Command Server to be notified automatically when vanity addresses are found, eliminating the need for continuous polling.
+
 #### API Endpoint Reference
 
 **GET /health**
@@ -264,10 +288,20 @@ curl -X POST http://localhost:7777/jobs/d290f1ee-6c54-4b01-90e6-d701748f0851/can
     "is_suffix": false,          // optional, defaults to false (prefix)
     "case_sensitive": true,      // optional, defaults to true
     "max_attempts": 10000000,    // optional, defaults to unlimited
-    "callback_url": "https://..." // optional, not yet implemented
+    "callback_url": "https://example.com/callback" // optional, for automatic notifications
   }
   ```
-- Response: `{"job_id": "d290f1ee-6c54-4b01-90e6-d701748f0851"}`
+- Response: 
+  ```json
+  {
+    "job_id": "d290f1ee-6c54-4b01-90e6-d701748f0851",
+    "status": "queued",
+    "notification": {
+      "type": "callback",
+      "message": "A POST request will be sent to your callback URL when the job completes"
+    }
+  }
+  ```
 
 **POST /jobs/{job_id}/cancel**
 - Description: Cancel a running job
@@ -307,7 +341,7 @@ Generated keypairs are stored in JSON format compatible with Solana CLI tools:
 - [ ] Unified Memory for simplified memory management
 - [ ] Pattern complexity analyzer to estimate search time more accurately
 - [ ] WebSocket notifications for job status changes
-- [ ] Support for external callback URLs after job completion
+- [x] Support for external callback URLs after job completion
 
 ## License
 
