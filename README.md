@@ -190,11 +190,88 @@ Check job status:
 curl http://localhost:7777/jobs/d290f1ee-6c54-4b01-90e6-d701748f0851
 ```
 
+Example response for a completed job:
+```json
+{
+  "id": "d290f1ee-6c54-4b01-90e6-d701748f0851",
+  "status": "Completed",
+  "request": {
+    "pattern": "DEGEN",
+    "is_suffix": false,
+    "case_sensitive": true,
+    "max_attempts": 100000000
+  },
+  "result": {
+    "address": "DEGENkF9Pd6MX9MWdGxRMw89iG4Pw4vgJY5CTCTbY8or",
+    "keypair_bytes": [236,18,32,...],
+    "attempts": 3726489,
+    "duration_ms": 15284,
+    "rate_per_second": 243815
+  },
+  "created_at": "2025-04-05T08:12:34.123Z",
+  "updated_at": "2025-04-05T08:13:12.456Z",
+  "attempts": 3726489,
+  "duration_ms": 15284
+}
+```
+
+The `result` object contains everything you need:
+- `address`: The Solana public address (as a string)
+- `keypair_bytes`: Array of bytes representing the full keypair (can be used with Solana SDK)
+
+To use the keypair in a Solana application or Command Server:
+
+```javascript
+// JavaScript example (Node.js with @solana/web3.js)
+const { Keypair } = require('@solana/web3.js');
+
+// Convert the keypair_bytes array from API response to Uint8Array
+const keypairBytes = new Uint8Array(response.result.keypair_bytes);
+
+// Create Solana keypair from bytes
+const keypair = Keypair.fromSecretKey(keypairBytes);
+
+// Now you can use this keypair for transactions
+console.log('Address:', keypair.publicKey.toString());
+```
+
 Cancel a job:
 
 ```bash
 curl -X POST http://localhost:7777/jobs/d290f1ee-6c54-4b01-90e6-d701748f0851/cancel
 ```
+
+#### API Endpoint Reference
+
+**GET /health**
+- Description: Check API server health
+- Response: `{"status": "ok", "timestamp": "2025-04-05T12:34:56Z"}`
+
+**GET /jobs**
+- Description: List all vanity generation jobs
+- Response: Array of job objects
+
+**GET /jobs/{job_id}**
+- Description: Get status and result for a specific job
+- Response: Complete job object including result if completed
+
+**POST /jobs**
+- Description: Create a new vanity generation job
+- Request Body:
+  ```json
+  {
+    "pattern": "DEGEN",
+    "is_suffix": false,          // optional, defaults to false (prefix)
+    "case_sensitive": true,      // optional, defaults to true
+    "max_attempts": 10000000,    // optional, defaults to unlimited
+    "callback_url": "https://..." // optional, not yet implemented
+  }
+  ```
+- Response: `{"job_id": "d290f1ee-6c54-4b01-90e6-d701748f0851"}`
+
+**POST /jobs/{job_id}/cancel**
+- Description: Cancel a running job
+- Response: `{"status": "cancelled", "job_id": "d290f1ee-6c54-4b01-90e6-d701748f0851"}`
 
 ## Keypair Output Format
 
