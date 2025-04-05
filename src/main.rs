@@ -70,51 +70,57 @@ enum Commands {
     },
 }
 
-async fn main() -> std::io::Result<()> {
-    let args: Vec<String> = env::args().collect();
+fn main() -> std::io::Result<()> {
+    // Create a tokio runtime for async operations
+    let rt = tokio::runtime::Runtime::new()?;
     
-    // Only run in legacy command mode if we have old-style arguments
-    if args.len() >= 2 && !args[1].starts_with("-") && 
-       !["benchmark", "estimate", "generate", "serve", "help"].contains(&args[1].to_lowercase().as_str()) {
-        return run_legacy_mode(args);
-    }
-    
-    // Parse command line arguments using Clap
-    let cli = Cli::parse();
-    
-    match cli.command {
-        Some(Commands::Benchmark) => {
-            run_benchmark_command();
-        },
-        Some(Commands::Estimate { pattern_length, case_sensitive }) => {
-            run_estimate_command(pattern_length, case_sensitive);
-        },
-        Some(Commands::Generate { pattern, suffix, no_case_sensitive, max_attempts }) => {
-            run_generate_command(&pattern, suffix, !no_case_sensitive, max_attempts);
-        },
-        Some(Commands::Serve { host, port, allowed_origins }) => {
-            let allowed_origins: Vec<String> = allowed_origins.split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-            
-            // Add the Command Server's IP
-            let mut origins = allowed_origins.clone();
-            origins.push("http://147.79.74.67".to_string());
-            origins.push("https://147.79.74.67".to_string());
-            
-            println!("{}", "Starting API server...".green().bold());
-            println!("Listening on {}:{}", host, port);
-            println!("Allowed origins: {}", origins.join(", "));
-            
-            api::run_api_server(&host, port, origins).await?;
-        },
-        None => {
-            print_banner();
-            println!("Use --help for more information");
+    // Run the async code in the runtime
+    rt.block_on(async {
+        let args: Vec<String> = env::args().collect();
+        
+        // Only run in legacy command mode if we have old-style arguments
+        if args.len() >= 2 && !args[1].starts_with("-") && 
+            !["benchmark", "estimate", "generate", "serve", "help"].contains(&args[1].to_lowercase().as_str()) {
+            return run_legacy_mode(args);
         }
-    }
-    
-    Ok(())
+        
+        // Parse command line arguments using Clap
+        let cli = Cli::parse();
+        
+        match cli.command {
+            Some(Commands::Benchmark) => {
+                run_benchmark_command();
+            },
+            Some(Commands::Estimate { pattern_length, case_sensitive }) => {
+                run_estimate_command(pattern_length, case_sensitive);
+            },
+            Some(Commands::Generate { pattern, suffix, no_case_sensitive, max_attempts }) => {
+                run_generate_command(&pattern, suffix, !no_case_sensitive, max_attempts);
+            },
+            Some(Commands::Serve { host, port, allowed_origins }) => {
+                let allowed_origins: Vec<String> = allowed_origins.split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                
+                // Add the Command Server's IP
+                let mut origins = allowed_origins.clone();
+                origins.push("http://147.79.74.67".to_string());
+                origins.push("https://147.79.74.67".to_string());
+                
+                println!("{}", "Starting API server...".green().bold());
+                println!("Listening on {}:{}", host, port);
+                println!("Allowed origins: {}", origins.join(", "));
+                
+                api::run_api_server(&host, port, origins).await?;
+            },
+            None => {
+                print_banner();
+                println!("Use --help for more information");
+            }
+        }
+        
+        Ok(())
+    })
 }
 
 /// Print welcome banner

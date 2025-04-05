@@ -2,6 +2,7 @@ use std::ffi::CString;
 use std::os::raw::{c_void, c_int, c_char};
 use std::ptr;
 use std::str;
+use cuda_driver_sys::CUresult;
 use std::time::{Duration, Instant};
 use colored::*;
 use rand::rngs::OsRng;
@@ -115,7 +116,7 @@ pub fn generate_vanity_address_with_updates(
     case_sensitive: bool,
     batch_size: usize,
     max_attempts: Option<u64>,
-    stop_flag: Arc<AtomicBool>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     update_callback: impl Fn(u64) + Send,
 ) -> Result<VanityResult> {
     // Pattern validation (Solana addresses use base58 alphabet)
@@ -177,7 +178,7 @@ pub fn generate_vanity_address_with_updates(
         let mut function = ptr::null_mut();
         // Get function from the module
         match cuda_driver_sys::cuModuleGetFunction(&mut function, device.get_module(), init_rng_name.as_ptr()) {
-            0 => function,
+            CUresult::CUDA_SUCCESS => function,
             error => return Err(CudaError::Driver(error)),
         }
     };
@@ -200,7 +201,7 @@ pub fn generate_vanity_address_with_updates(
             init_args.as_mut_ptr(),
             ptr::null_mut(), // Extra
         ) {
-            0 => (),
+            CUresult::CUDA_SUCCESS => (),
             error => return Err(CudaError::Driver(error)),
         }
         
@@ -214,7 +215,7 @@ pub fn generate_vanity_address_with_updates(
         let mut function = ptr::null_mut();
         // Get function from the module
         match cuda_driver_sys::cuModuleGetFunction(&mut function, device.get_module(), gen_name.as_ptr()) {
-            0 => function,
+            CUresult::CUDA_SUCCESS => function,
             error => return Err(CudaError::Driver(error)),
         }
     };
@@ -245,7 +246,7 @@ pub fn generate_vanity_address_with_updates(
 
     while !found && attempts < max_attempts {
         // Check if we should stop (for cancellation)
-        if stop_flag.load(Ordering::Relaxed) {
+        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
             unsafe {
                 device.free(d_states)?;
                 device.free(d_seeds)?;
@@ -285,7 +286,7 @@ pub fn generate_vanity_address_with_updates(
                 gen_args.as_mut_ptr(),
                 ptr::null_mut(), // Extra
             ) {
-                0 => (),
+                CUresult::CUDA_SUCCESS => (),
                 error => return Err(CudaError::Driver(error)),
             }
             
@@ -315,7 +316,8 @@ pub fn generate_vanity_address_with_updates(
         }
         
         // Create a Solana keypair from the seed
-        let keypair = Keypair::from_bytes(&result_bytes)?;
+        let keypair = Keypair::from_bytes(&result_bytes)
+            .map_err(|e| CudaError::Other(format!("Failed to create keypair: {}", e)))?;
         let address = keypair.pubkey().to_string();
         
         // Clean up device memory

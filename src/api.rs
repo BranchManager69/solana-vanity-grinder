@@ -52,6 +52,18 @@ pub enum JobStatus {
     Cancelled,
 }
 
+impl std::fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JobStatus::Queued => write!(f, "Queued"),
+            JobStatus::Running => write!(f, "Running"),
+            JobStatus::Completed => write!(f, "Completed"),
+            JobStatus::Failed => write!(f, "Failed"),
+            JobStatus::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
 // Job manager
 #[derive(Debug)]
 pub struct JobManager {
@@ -113,10 +125,10 @@ impl JobManager {
         jobs.get(job_id).cloned()
     }
 
-    pub fn update_job_status(&self, job_id: &str, status: JobStatus) -> Result<(), String> {
+    pub fn update_job_status(&self, job_id: String, status: JobStatus) -> Result<(), String> {
         let mut jobs = self.jobs.lock().unwrap();
         
-        if let Some(job) = jobs.get_mut(job_id) {
+        if let Some(job) = jobs.get_mut(&job_id) {
             job.status = status;
             job.updated_at = chrono::Utc::now();
             Ok(())
@@ -125,10 +137,10 @@ impl JobManager {
         }
     }
 
-    pub fn update_job_attempts(&self, job_id: &str, attempts: u64) -> Result<(), String> {
+    pub fn update_job_attempts(&self, job_id: String, attempts: u64) -> Result<(), String> {
         let mut jobs = self.jobs.lock().unwrap();
         
-        if let Some(job) = jobs.get_mut(job_id) {
+        if let Some(job) = jobs.get_mut(&job_id) {
             job.attempts = attempts;
             job.updated_at = chrono::Utc::now();
             Ok(())
@@ -137,10 +149,10 @@ impl JobManager {
         }
     }
 
-    pub fn set_job_result(&self, job_id: &str, result: VanityResponse) -> Result<(), String> {
+    pub fn set_job_result(&self, job_id: String, result: VanityResponse) -> Result<(), String> {
         let mut jobs = self.jobs.lock().unwrap();
         
-        if let Some(job) = jobs.get_mut(job_id) {
+        if let Some(job) = jobs.get_mut(&job_id) {
             // Update job with result
             job.status = JobStatus::Completed;
             job.result = Some(result.clone());
@@ -149,15 +161,17 @@ impl JobManager {
             job.attempts = result.attempts;
             
             // Check if there's a callback URL to notify
-            if let Some(callback_url) = &job.request.callback_url {
+            if let Some(callback_url) = &job.request.callback_url.clone() {
                 // Clone the job for the callback
                 let job_clone = job.clone();
+                let callback_url = callback_url.clone();
+                let job_id_clone = job_id.clone();
                 
                 // Spawn a task to send the callback asynchronously
                 tokio::spawn(async move {
                     // Try to send the callback
                     let client = reqwest::Client::new();
-                    match client.post(callback_url)
+                    match client.post(&callback_url)
                         .json(&job_clone)
                         .timeout(Duration::from_secs(10))
                         .send()
@@ -165,14 +179,14 @@ impl JobManager {
                     {
                         Ok(response) => {
                             if response.status().is_success() {
-                                info!("Callback to {} succeeded for job {}", callback_url, job_id);
+                                info!("Callback to {} succeeded for job {}", callback_url, job_id_clone);
                             } else {
                                 warn!("Callback to {} for job {} returned non-success status: {}", 
-                                      callback_url, job_id, response.status());
+                                      callback_url, job_id_clone, response.status());
                             }
                         },
                         Err(e) => {
-                            warn!("Callback to {} for job {} failed: {}", callback_url, job_id, e);
+                            warn!("Callback to {} for job {} failed: {}", callback_url, job_id_clone, e);
                         }
                     }
                 });
@@ -184,24 +198,26 @@ impl JobManager {
         }
     }
 
-    pub fn set_job_failed(&self, job_id: &str, error: &str) -> Result<(), String> {
+    pub fn set_job_failed(&self, job_id: String, error_msg: String) -> Result<(), String> {
         let mut jobs = self.jobs.lock().unwrap();
         
-        if let Some(job) = jobs.get_mut(job_id) {
+        if let Some(job) = jobs.get_mut(&job_id) {
             job.status = JobStatus::Failed;
             job.updated_at = chrono::Utc::now();
-            info!("Job {} failed: {}", job_id, error);
+            info!("Job {} failed: {}", job_id, error_msg);
             
             // Check if there's a callback URL to notify
-            if let Some(callback_url) = &job.request.callback_url {
+            if let Some(callback_url) = &job.request.callback_url.clone() {
                 // Clone the job for the callback
                 let job_clone = job.clone();
+                let callback_url = callback_url.clone();
+                let job_id_clone = job_id.clone();
                 
                 // Spawn a task to send the callback asynchronously
                 tokio::spawn(async move {
                     // Try to send the callback
                     let client = reqwest::Client::new();
-                    match client.post(callback_url)
+                    match client.post(&callback_url)
                         .json(&job_clone)
                         .timeout(Duration::from_secs(10))
                         .send()
@@ -209,14 +225,14 @@ impl JobManager {
                     {
                         Ok(response) => {
                             if response.status().is_success() {
-                                info!("Failure callback to {} succeeded for job {}", callback_url, job_id);
+                                info!("Failure callback to {} succeeded for job {}", callback_url, job_id_clone);
                             } else {
                                 warn!("Failure callback to {} for job {} returned non-success status: {}", 
-                                      callback_url, job_id, response.status());
+                                      callback_url, job_id_clone, response.status());
                             }
                         },
                         Err(e) => {
-                            warn!("Failure callback to {} for job {} failed: {}", callback_url, job_id, e);
+                            warn!("Failure callback to {} for job {} failed: {}", callback_url, job_id_clone, e);
                         }
                     }
                 });
@@ -228,14 +244,14 @@ impl JobManager {
         }
     }
 
-    pub fn cancel_job(&self, job_id: &str) -> Result<(), String> {
+    pub fn cancel_job(&self, job_id: String) -> Result<(), String> {
         let mut jobs = self.jobs.lock().unwrap();
         
-        if let Some(job) = jobs.get_mut(job_id) {
+        if let Some(job) = jobs.get_mut(&job_id) {
             if job.status == JobStatus::Running || job.status == JobStatus::Queued {
                 job.status = JobStatus::Cancelled;
                 job.updated_at = chrono::Utc::now();
-                self.stop_flag.store(true, Ordering::SeqCst);
+                self.stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             } else {
                 Err(format!("Job {} is in state {} and cannot be cancelled", job_id, job.status))
@@ -258,10 +274,10 @@ impl JobManager {
         }
         
         let job = job_option.unwrap();
-        self.update_job_status(&job_id, JobStatus::Running)?;
+        self.update_job_status(job_id.clone(), JobStatus::Running)?;
         
         // Reset stop flag
-        self.stop_flag.store(false, Ordering::SeqCst);
+        self.stop_flag.store(false, std::sync::atomic::Ordering::SeqCst);
         
         // Get CUDA device
         let device_guard = self.cuda_device.lock().unwrap();
@@ -282,7 +298,11 @@ impl JobManager {
             VanityMode::Prefix
         };
         
-        let start_time = Instant::now();
+        // No need for start time here as the kernel has its own timing
+        // let start_time = Instant::now();
+        
+        // For callback updates, we need a thread-safe way to access the job_id
+        let job_id_clone = job_id.clone();
         
         // Run the vanity address search
         let search_result = vanity_generator::generate_vanity_address_with_updates(
@@ -293,8 +313,8 @@ impl JobManager {
             batch_size,
             job.request.max_attempts,
             self.stop_flag.clone(),
-            |attempts| {
-                let _ = self.update_job_attempts(&job_id, attempts);
+            move |attempts| {
+                let _ = self.update_job_attempts(job_id_clone.clone(), attempts);
             }
         );
         
@@ -313,12 +333,12 @@ impl JobManager {
                 };
                 
                 // Update job with result
-                self.set_job_result(&job_id, response.clone())?;
+                self.set_job_result(job_id.clone(), response.clone())?;
                 
                 Ok(response)
             },
             Err(e) => {
-                self.set_job_failed(&job_id, &e.to_string())?;
+                self.set_job_failed(job_id.clone(), e.to_string())?;
                 Err(e.to_string())
             },
         }
@@ -412,7 +432,7 @@ async fn create_job(
 async fn cancel_job(job_manager: web::Data<JobManager>, path: web::Path<String>) -> impl Responder {
     let job_id = path.into_inner();
     
-    match job_manager.cancel_job(&job_id) {
+    match job_manager.cancel_job(job_id.clone()) {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({
             "status": "cancelled",
             "job_id": job_id
@@ -448,15 +468,20 @@ pub async fn run_api_server(
     // Clone job manager for worker thread
     let job_manager_clone = job_manager.clone();
     
-    // Spawn worker thread
-    tokio::spawn(async move {
-        while let Some(job_id) = job_receiver.recv().await {
-            info!("Processing job: {}", job_id);
-            
-            if let Err(e) = job_manager_clone.worker_loop(job_id.clone()) {
-                error!("Job {} failed: {}", job_id, e);
+    // Create a basic thread (not tokio spawn) to avoid Send bound issues with CUDA FFI pointers
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+        
+        // Run the async logic in the new thread's runtime
+        rt.block_on(async {
+            while let Some(job_id) = job_receiver.recv().await {
+                info!("Processing job: {}", job_id);
+                
+                if let Err(e) = job_manager_clone.worker_loop(job_id.clone()) {
+                    error!("Job {} failed: {}", job_id, e);
+                }
             }
-        }
+        });
     });
     
     // Start API server
@@ -500,8 +525,17 @@ pub fn generate_vanity_address_with_updates(
     max_attempts: Option<u64>,
     stop_flag: Arc<AtomicBool>,
     update_callback: impl Fn(u64) + Send + 'static,
-) -> Result<vanity_generator::VanityResult, vanity_generator::CudaError> {
-    // Implement a modified version of the generate_vanity_address function 
-    // that reports progress and checks for the stop flag
-    todo!("Implement the vanity address generator with progress updates")
+) -> Result<vanity_generator::VanityResult, crate::cuda_helpers::CudaError> {
+    // This is a wrapper around the vanity_generator function that adds proper progress updates
+    // We simply call the implementation that already exists in the vanity_generator module
+    vanity_generator::generate_vanity_address_with_updates(
+        device,
+        pattern,
+        mode,
+        case_sensitive,
+        batch_size,
+        max_attempts,
+        stop_flag,
+        update_callback
+    )
 }

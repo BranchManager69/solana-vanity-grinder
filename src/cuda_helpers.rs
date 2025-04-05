@@ -17,6 +17,7 @@ pub enum CudaError {
     Driver(CUresult),
     Runtime(cudaError_t),
     Other(String),
+    SignatureError(String),
 }
 
 impl std::fmt::Display for CudaError {
@@ -25,13 +26,20 @@ impl std::fmt::Display for CudaError {
             CudaError::Driver(code) => write!(f, "CUDA driver error: {}", cuda_driver_error_to_str(*code)),
             CudaError::Runtime(code) => write!(f, "CUDA runtime error: {}", cuda_runtime_error_to_str(*code)),
             CudaError::Other(msg) => write!(f, "CUDA error: {}", msg),
+            CudaError::SignatureError(e) => write!(f, "Signature error: {}", e),
         }
     }
 }
 
 impl std::error::Error for CudaError {}
 
-type Result<T> = std::result::Result<T, CudaError>;
+impl From<solana_sdk::signature::SignerError> for CudaError {
+    fn from(e: solana_sdk::signature::SignerError) -> Self {
+        CudaError::SignatureError(e.to_string())
+    }
+}
+
+pub type Result<T> = std::result::Result<T, CudaError>;
 
 /// Convert CUDA driver error code to string
 fn cuda_driver_error_to_str(error: CUresult) -> String {
@@ -77,6 +85,7 @@ fn check_rt(result: cudaError_t) -> Result<()> {
 }
 
 /// CUDA device information
+#[derive(Debug)]
 pub struct CudaDevice {
     device: CUdevice,
     context: CUcontext,
@@ -86,6 +95,10 @@ pub struct CudaDevice {
     compute_capability: (i32, i32),
     total_memory: usize,
 }
+
+// Safety: These are manually managed GPU resources and we ensure proper synchronization
+unsafe impl Send for CudaDevice {}
+unsafe impl Sync for CudaDevice {}
 
 impl CudaDevice {
     /// Get the CUDA module

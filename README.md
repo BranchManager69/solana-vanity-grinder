@@ -96,8 +96,10 @@ Batch Size         Relative Performance
 ## Installation Requirements
 
 - CUDA Toolkit 11.0+ (10.0+ may work with reduced functionality)
-- Rust 1.50+ with cargo
+- Rust 1.81.0+ with cargo (important for dependency compatibility)
 - NVIDIA GPU with Compute Capability 6.0+ (Pascal architecture or newer)
+
+### Standard Installation
 
 ```bash
 # Clone the repository
@@ -110,6 +112,39 @@ cargo build --release
 # Verify CUDA device compatibility
 ./target/release/vanity-grinder benchmark
 ```
+
+### Lambda Labs GPU Instance Setup
+
+If you're using a Lambda Labs GPU instance or similar cloud GPU environment, the setup requires a few additional steps due to system Rust version constraints. We've created a simple setup process:
+
+1. **First-time setup (just once):**
+
+```bash
+# Navigate to your persistent storage directory
+cd /home/ubuntu/degenduel-gpu
+
+# Run the provided setup script
+./run-vanity.sh
+```
+
+This script handles:
+- Setting up the necessary Rust 1.81.0 environment
+- Building the project with all optimizations
+- Displaying available commands
+
+2. **Starting in future sessions:**
+
+```bash
+# From any directory, run:
+/home/ubuntu/degenduel-gpu/run-vanity.sh
+
+# This will:
+# - Set up the Rust environment
+# - Change to the vanity-grinder directory
+# - Show available commands
+```
+
+The script creates symlinks in your persistent storage to ensure the correct Rust version is used each time, even if the Lambda Labs instance has an older system Rust version.
 
 ## Technical Usage
 
@@ -241,9 +276,17 @@ Cancel a job:
 curl -X POST http://localhost:7777/jobs/d290f1ee-6c54-4b01-90e6-d701748f0851/cancel
 ```
 
-#### Using Callbacks for Command Server Integration
+## Command Server Integration
 
-Instead of polling for job status, you can provide a callback URL when creating a job:
+The vanity-grinder REST API is designed to integrate seamlessly with the DegenDuel Command Server. This section provides detailed instructions for setting up this integration.
+
+### Command Server Configuration
+
+The vanity-grinder is pre-configured to accept requests from the Command Server at IP `147.79.74.67`. When you start the REST API server, this origin is automatically added to the allowed CORS list.
+
+### Using Callbacks for Notification
+
+Instead of polling for job status, the Command Server should provide a callback URL when creating a job:
 
 ```bash
 curl -X POST http://localhost:7777/jobs \
@@ -264,6 +307,74 @@ When the job completes or fails, the vanity-grinder will send a POST request to 
 - Performance metrics
 
 This allows your Command Server to be notified automatically when vanity addresses are found, eliminating the need for continuous polling.
+
+### Command Server Implementation Example
+
+Here's a simple Express.js-based Command Server implementation:
+
+```javascript
+const express = require('express');
+const axios = require('axios');
+const app = express();
+app.use(express.json());
+
+// Vanity Grinder API endpoint
+const VANITY_GRINDER_URL = 'http://YOUR_VANITY_GRINDER_IP:7777';
+
+// Endpoint to submit vanity address generation requests
+app.post('/generate-vanity', async (req, res) => {
+  const { pattern, is_suffix = false, case_sensitive = true } = req.body;
+  
+  try {
+    // Submit job to vanity-grinder
+    const response = await axios.post(`${VANITY_GRINDER_URL}/jobs`, {
+      pattern,
+      is_suffix,
+      case_sensitive,
+      callback_url: 'http://147.79.74.67:8080/vanity-callback' // Your Command Server callback URL
+    });
+    
+    res.json({ job_id: response.data.job_id, status: 'submitted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Callback endpoint to receive completed keypairs
+app.post('/vanity-callback', (req, res) => {
+  const job = req.body;
+  
+  if (job.status === 'Completed' && job.result) {
+    // Process the found keypair
+    const { address, keypair_bytes } = job.result;
+    console.log(`Found address: ${address}`);
+    
+    // Store the keypair in your database
+    // ...
+
+    // Convert to Solana keypair if needed
+    // const keypair = Keypair.fromSecretKey(new Uint8Array(keypair_bytes));
+  }
+  
+  // Always acknowledge receipt
+  res.status(200).send('OK');
+});
+
+// Listen on your Command Server IP
+app.listen(8080, '0.0.0.0', () => {
+  console.log('Command Server ready to dispatch vanity address jobs');
+});
+```
+
+### Advanced Integration Features
+
+- **Job Queuing**: The Command Server can queue multiple requests and track their status
+- **Priority Control**: Implement priority levels for different types of vanity address generation
+- **Rate Limiting**: Control the flow of requests to the vanity-grinder
+- **Keypair Management**: Securely store and manage generated keypairs
+- **Failure Handling**: Implement retry logic for failed jobs
+
+The callback system ensures reliable notification even if the Command Server temporarily goes offline during processing.
 
 #### API Endpoint Reference
 
@@ -342,6 +453,48 @@ Generated keypairs are stored in JSON format compatible with Solana CLI tools:
 - [ ] Pattern complexity analyzer to estimate search time more accurately
 - [ ] WebSocket notifications for job status changes
 - [x] Support for external callback URLs after job completion
+
+## Troubleshooting
+
+### Rust Version Issues
+
+If you encounter errors like:
+```
+error: package `native-tls v0.2.14` cannot be built because it requires rustc 1.80.0 or newer
+```
+
+Use our helper script which properly configures Rust 1.81.0:
+```bash
+/home/ubuntu/degenduel-gpu/run-vanity.sh
+```
+
+### CUDA Initialization Failures
+
+If CUDA initialization fails, check:
+- NVIDIA drivers are installed: `nvidia-smi`
+- CUDA Toolkit is installed: `nvcc --version`
+- Your GPU has Compute Capability 6.0+ (Pascal architecture or newer)
+
+### API Server Connectivity Issues
+
+If the Command Server can't connect to the vanity-grinder API:
+- Ensure the API server is running on a publicly accessible interface: `--host 0.0.0.0`
+- Verify port 7777 is open in any firewalls/security groups
+- Check that the Command Server IP (147.79.74.67) is in the allowed CORS origins
+
+### For Lambda Labs Environments
+
+Lambda Labs instances may lose non-persistent data between sessions. Always:
+- Store important keypairs in persistent storage (`/home/ubuntu/degenduel-gpu/`)
+- Use the `run-vanity.sh` script when starting a new session
+- Update the Command Server URL if your API server's IP changes
+
+### Callback Issues
+
+If callbacks aren't working:
+- Make sure the Command Server is running and listening for callbacks
+- Check for any network restrictions between the vanity-grinder and Command Server
+- Verify the callback URL is properly formatted (http://147.79.74.67:8080/vanity-callback)
 
 ## License
 
