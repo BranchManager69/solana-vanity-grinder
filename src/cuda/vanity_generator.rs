@@ -1,0 +1,298 @@
+use std::ffi::CString;
+use std::os::raw::{c_void, c_int, c_char};
+use std::ptr;
+use std::str;
+use std::time::{Duration, Instant};
+use colored::*;
+use rand::rngs::OsRng;
+use rand::Rng;
+use solana_sdk::signature::{Keypair, Signer};
+use crate::cuda_helpers::{CudaDevice, CudaError, Result};
+
+/// Generator mode for vanity addresses
+pub enum VanityMode {
+    /// Match at the beginning of the address
+    Prefix,
+    /// Match at the end of the address
+    Suffix,
+    /// Match at specific position (index, pattern)
+    Position(usize, String),
+    /// Match anywhere in the address
+    Contains,
+}
+
+/// Result of a vanity address search
+pub struct VanityResult {
+    /// The found keypair
+    pub keypair: Keypair,
+    /// The address of the keypair
+    pub address: String,
+    /// How long the search took
+    pub duration: Duration,
+    /// How many attempts were made
+    pub attempts: u64,
+}
+
+/// Generate a vanity address matching the specified pattern
+pub fn generate_vanity_address(
+    device: &CudaDevice,
+    pattern: &str,
+    mode: VanityMode,
+    case_sensitive: bool,
+    batch_size: usize,
+    max_attempts: Option<u64>,
+) -> Result<VanityResult> {
+    // Pattern validation (Solana addresses use base58 alphabet)
+    for c in pattern.chars() {
+        if !"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains(c) {
+            return Err(CudaError::Other(format!("Invalid character '{}' in pattern. Only Base58 characters are allowed.", c)));
+        }
+    }
+
+    // Convert pattern to CString for passing to kernel
+    let pattern_cstring = match CString::new(pattern) {
+        Ok(cs) => cs,
+        Err(_) => return Err(CudaError::Other("Invalid pattern string".to_string())),
+    };
+
+    // Determine if we're searching by prefix
+    let is_prefix = match mode {
+        VanityMode::Prefix => true,
+        VanityMode::Suffix => false,
+        _ => return Err(CudaError::Other("Only prefix and suffix modes are currently supported".to_string())),
+    };
+
+    // Allocate device memory for various data structures
+    let states_size = batch_size * std::mem::size_of::<u64>() * 8; // Estimate for curandState
+    let d_states = device.alloc(states_size)?;
+    
+    let key_size = 32; // Ed25519 seed size
+    let seeds_size = batch_size * key_size;
+    let d_seeds = device.alloc(seeds_size)?;
+    
+    let d_result = device.alloc(key_size)?;
+    let d_found_flag = device.alloc(std::mem::size_of::<c_int>())?;
+
+    // Zero out the found flag
+    let found_flag: c_int = 0;
+    unsafe {
+        device.copy_htod(d_found_flag, &found_flag as *const _ as *const c_void, std::mem::size_of::<c_int>())?;
+    }
+
+    // Copy pattern to device
+    let pattern_bytes = pattern_cstring.as_bytes_with_nul();
+    let d_pattern = device.alloc(pattern_bytes.len())?;
+    unsafe {
+        device.copy_htod(d_pattern, pattern_bytes.as_ptr() as *const c_void, pattern_bytes.len())?;
+    }
+
+    // Initialize random number generator states
+    let mut rng = OsRng;
+    let random_seed: u64 = rng.gen();
+    
+    // Setup init RNG kernel parameters
+    let threads_per_block = 256;
+    let blocks = (batch_size as u32 + threads_per_block - 1) / threads_per_block;
+    let batch_size_int = batch_size as c_int;
+
+    // Get init_rng function from the module
+    let init_rng_name = CString::new("init_rng").map_err(|e| CudaError::Other(e.to_string()))?;
+    let init_rng_fn = unsafe {
+        let mut function = ptr::null_mut();
+        // Get function from the module
+        match cuda_driver_sys::cuModuleGetFunction(&mut function, device.get_module(), init_rng_name.as_ptr()) {
+            0 => function,
+            error => return Err(CudaError::Driver(error)),
+        }
+    };
+
+    // Prepare and launch init_rng kernel
+    let mut init_args = [
+        &d_states as *const _ as *mut c_void,
+        &random_seed as *const _ as *mut c_void,
+        &batch_size_int as *const _ as *mut c_void,
+    ];
+
+    unsafe {
+        // Launch init_rng kernel
+        match cuda_driver_sys::cuLaunchKernel(
+            init_rng_fn,
+            blocks, 1, 1,
+            threads_per_block, 1, 1,
+            0, // Shared memory bytes
+            ptr::null_mut(), // Stream
+            init_args.as_mut_ptr(),
+            ptr::null_mut(), // Extra
+        ) {
+            0 => (),
+            error => return Err(CudaError::Driver(error)),
+        }
+        
+        // Wait for init kernel to finish
+        device.synchronize()?;
+    }
+
+    // Get generate_and_check_keypairs function from the module
+    let gen_name = CString::new("generate_and_check_keypairs").map_err(|e| CudaError::Other(e.to_string()))?;
+    let gen_fn = unsafe {
+        let mut function = ptr::null_mut();
+        // Get function from the module
+        match cuda_driver_sys::cuModuleGetFunction(&mut function, device.get_module(), gen_name.as_ptr()) {
+            0 => function,
+            error => return Err(CudaError::Driver(error)),
+        }
+    };
+
+    // Prepare parameters for the main kernel
+    let pattern_len = pattern.len() as c_int;
+    let is_prefix_int = if is_prefix { 1 } else { 0 };
+    let case_sensitive_int = if case_sensitive { 1 } else { 0 };
+
+    // Prepare kernel arguments
+    let mut gen_args = [
+        &d_states as *const _ as *mut c_void,
+        &d_seeds as *const _ as *mut c_void,
+        &d_result as *const _ as *mut c_void,
+        &d_found_flag as *const _ as *mut c_void,
+        &d_pattern as *const _ as *mut c_void,
+        &pattern_len as *const _ as *mut c_void,
+        &is_prefix_int as *const _ as *mut c_void,
+        &case_sensitive_int as *const _ as *mut c_void,
+        &batch_size_int as *const _ as *mut c_void,
+    ];
+
+    // Start timing and searching
+    let start_time = Instant::now();
+    let mut found = false;
+    let mut attempts = 0u64;
+    let max_attempts = max_attempts.unwrap_or(u64::MAX);
+
+    while !found && attempts < max_attempts {
+        // Update progress every 5 iterations
+        if attempts % (5 * batch_size as u64) == 0 && attempts > 0 {
+            let elapsed = start_time.elapsed();
+            let rate = attempts as f64 / elapsed.as_secs_f64();
+            
+            println!("{}",
+                     format!("⚡ Searching... {} addresses checked ({}/s)",
+                             format_number(attempts as f64),
+                             format_number(rate))
+                     .bright_blue());
+        }
+
+        unsafe {
+            // Launch the main kernel
+            match cuda_driver_sys::cuLaunchKernel(
+                gen_fn,
+                blocks, 1, 1,
+                threads_per_block, 1, 1,
+                0, // Shared memory bytes
+                ptr::null_mut(), // Stream
+                gen_args.as_mut_ptr(),
+                ptr::null_mut(), // Extra
+            ) {
+                0 => (),
+                error => return Err(CudaError::Driver(error)),
+            }
+            
+            // Wait for kernel to finish
+            device.synchronize()?;
+            
+            // Check if we found a match
+            let mut found_flag_result: c_int = 0;
+            device.copy_dtoh(&mut found_flag_result as *mut _ as *mut c_void, d_found_flag, std::mem::size_of::<c_int>())?;
+            
+            found = found_flag_result > 0;
+            attempts += batch_size as u64;
+        }
+    }
+
+    // If found, retrieve the result
+    if found {
+        let duration = start_time.elapsed();
+        
+        // Get the result keypair data
+        let mut result_bytes = [0u8; 32];
+        unsafe {
+            device.copy_dtoh(result_bytes.as_mut_ptr() as *mut c_void, d_result, key_size)?;
+        }
+        
+        // Create a Solana keypair from the seed
+        let keypair = Keypair::from_bytes(&result_bytes)?;
+        let address = keypair.pubkey().to_string();
+        
+        // Clean up device memory
+        unsafe {
+            device.free(d_states)?;
+            device.free(d_seeds)?;
+            device.free(d_result)?;
+            device.free(d_found_flag)?;
+            device.free(d_pattern)?;
+        }
+        
+        Ok(VanityResult {
+            keypair,
+            address,
+            duration,
+            attempts,
+        })
+    } else {
+        // Clean up device memory
+        unsafe {
+            device.free(d_states)?;
+            device.free(d_seeds)?;
+            device.free(d_result)?;
+            device.free(d_found_flag)?;
+            device.free(d_pattern)?;
+        }
+        
+        Err(CudaError::Other("Maximum attempts reached without finding a match".to_string()))
+    }
+}
+
+/// Format a number with commas for better readability
+pub fn format_number(num: f64) -> String {
+    if num >= 1_000_000.0 {
+        // For large numbers, use no decimal places
+        let num_int = num.round() as u64;
+        let mut s = String::new();
+        let digits = num_int.to_string();
+        let len = digits.len();
+        
+        for (i, c) in digits.chars().enumerate() {
+            s.push(c);
+            if (len - i - 1) % 3 == 0 && i < len - 1 {
+                s.push(',');
+            }
+        }
+        s
+    } else if num >= 1_000.0 {
+        // For medium numbers, use one decimal place
+        let mut s = String::new();
+        let num_rounded = (num * 10.0).round() / 10.0;
+        let digits = format!("{:.1}", num_rounded);
+        let parts: Vec<&str> = digits.split('.').collect();
+        
+        // Format integer part with commas
+        let int_part = parts[0];
+        let len = int_part.len();
+        
+        for (i, c) in int_part.chars().enumerate() {
+            s.push(c);
+            if (len - i - 1) % 3 == 0 && i < len - 1 {
+                s.push(',');
+            }
+        }
+        
+        // Add decimal part if present
+        if parts.len() > 1 && parts[1] != "0" {
+            s.push('.');
+            s.push_str(parts[1]);
+        }
+        
+        s
+    } else {
+        // For small numbers, use two decimal places
+        format!("{:.2}", num)
+    }
+}
