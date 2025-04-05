@@ -1,5 +1,13 @@
 # Solana Vanity Address Grinder
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub stars](https://img.shields.io/github/stars/BranchManager69/solana-vanity-grinder?style=social)](https://github.com/BranchManager69/solana-vanity-grinder/stargazers)
+[![CUDA](https://img.shields.io/badge/CUDA-11.0%2B-76B900?logo=nvidia)](https://developer.nvidia.com/cuda-toolkit)
+[![Solana](https://img.shields.io/badge/Solana-Compatible-14F195?logo=solana)](https://solana.com)
+[![Rust](https://img.shields.io/badge/Made%20with-Rust-DEA584?logo=rust)](https://www.rust-lang.org)
+[![Release](https://img.shields.io/github/v/release/BranchManager69/solana-vanity-grinder?include_prereleases&color=blue)](https://github.com/BranchManager69/solana-vanity-grinder/releases)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/BranchManager69/solana-vanity-grinder/rust.yml?branch=main&logo=github)](https://github.com/BranchManager69/solana-vanity-grinder/actions)
+
 An ultra-high performance tool for generating Solana vanity addresses utilizing advanced CUDA-accelerated Ed25519 keypair generation.
 
 ## Technical Overview
